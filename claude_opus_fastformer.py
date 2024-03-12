@@ -1,7 +1,4 @@
-from transformers import BertConfig
 from transformers.models.bert.modeling_bert import BertSelfOutput, BertIntermediate, BertOutput
-
-config=BertConfig.from_json_file('fastformer_claude_opus.json')
 
 import torch
 import torch.nn as nn
@@ -74,15 +71,15 @@ class FastSelfAttention(nn.Module):
     
     def forward(self, hidden_states, attention_mask):
         # batch_size, seq_len, num_head * head_dim, batch_size, seq_len
-        print("FastSelfAttention hidden_states shape:", hidden_states.shape)
+        # print("FastSelfAttention hidden_states shape:", hidden_states.shape)
         batch_size, seq_len, _ = hidden_states.shape
         mixed_query_layer = self.query(hidden_states)
         mixed_key_layer = self.key(hidden_states)
         # batch_size, num_head, seq_len
         query_for_score = self.query_att(mixed_query_layer).transpose(1, 2) / self.attention_head_size**0.5
         # add attention mask
-        print("FastSelfAttention query_for_score shape:", query_for_score.shape)
-        print("FastSelfAttention attention_mask shape:", attention_mask.shape)
+        # print("FastSelfAttention query_for_score shape:", query_for_score.shape)
+        # print("FastSelfAttention attention_mask shape:", attention_mask.shape)
         query_for_score += attention_mask
 
         # batch_size, num_head, 1, seq_len
@@ -193,7 +190,7 @@ class FastformerEncoder(nn.Module):
         embeddings = self.LayerNorm(embeddings)
         embeddings = self.dropout(embeddings)
         
-        print(embeddings.size())
+        # print(embeddings.size())
         all_hidden_states = [embeddings]
 
         for i, layer_module in enumerate(self.encoders):
@@ -203,40 +200,15 @@ class FastformerEncoder(nn.Module):
         output = self.poolers[pooler_index](all_hidden_states[-1], attention_mask)
 
         return output 
-        # extended_attention_mask = attention_mask.unsqueeze(1)
-        # extended_attention_mask = extended_attention_mask.to(dtype=next(self.parameters()).dtype)  # fp16 compatibility
-        # extended_attention_mask = (1.0 - extended_attention_mask) * -10000.0
-
-        # batch_size, seq_length, emb_dim = input_embs.shape
-        # position_ids = torch.arange(seq_length, dtype=torch.long, device=input_embs.device)
-        # position_ids = position_ids.unsqueeze(0).expand(batch_size, -1)
-        # position_embeddings = self.position_embeddings(position_ids)
-
-        # embeddings = input_embs + position_embeddings
-        
-        # embeddings = self.LayerNorm(embeddings)
-        # embeddings = self.dropout(embeddings)
-        # #print(embeddings.size())
-        # all_hidden_states = [embeddings]
-
-        # for i, layer_module in enumerate(self.encoders):
-        #     layer_outputs = layer_module(all_hidden_states[-1], extended_attention_mask)
-        #     all_hidden_states.append(layer_outputs)
-        # assert len(self.poolers) > pooler_index
-        # output = self.poolers[pooler_index](all_hidden_states[-1], attention_mask)
-
-        # return output 
-    
     
 
 class NewsRecommendationModel(torch.nn.Module):
-    def __init__(self, user_embedding_dim, num_classes, device):
+    def __init__(self, config, news_embedding_dim, num_classes, device):
         super(NewsRecommendationModel, self).__init__()
         self.device = device
         self.config = config
-        self.fastformer_model = FastformerEncoder(config, emb_dim=user_embedding_dim)
-        self.dense = nn.Linear(config.hidden_size + user_embedding_dim, num_classes)
-        # self.criterion = nn.CrossEntropyLoss()
+        self.fastformer_model = FastformerEncoder(config, emb_dim=news_embedding_dim)
+        self.dense = nn.Linear(news_embedding_dim, num_classes)
         self.criterion = nn.BCELoss()
         self.apply(self.init_weights)
 
@@ -246,38 +218,17 @@ class NewsRecommendationModel(torch.nn.Module):
         if isinstance(module, nn.Linear) and module.bias is not None:
             module.bias.data.zero_()
 
-    def forward(self, news_embds, user_embds, targets):
-        print("NewsRecommendationModel news_embds shape:", news_embds.shape)
-        print("NewsRecommendationModel user_embds shape:", user_embds.shape)
-
-        batch_size, seq_length, emb_dim = news_embds.shape
-        # news_embds = news_embds.unsqueeze(1)  # Add an extra dimension for seq_length
-        print("NewsRecommendationModel news_embds shape after unsqueeze:", news_embds.shape)
+            
+    def forward(self, user_history_embds, impression_embds, targets):
+        batch_size, seq_length, emb_dim = user_history_embds.shape
 
         mask = torch.ones(batch_size, seq_length).to(self.device)
-        print("NewsRecommendationModel mask shape:", mask.shape)
 
-        news_vec = self.fastformer_model(news_embds, mask, -1)
-        # news_vec = news_vec.view(batch_size, seq_length, -1)
-        print("NewsRecommendationModel news_vec shape after view:", news_vec.shape) 
+        user_embds = self.fastformer_model(user_history_embds, mask, -1)
 
-        # Reshape news_vec to match the shape of user_embds
-        news_vec = news_vec.unsqueeze(1).expand(-1, seq_length, -1)
-        user_embds = user_embds.unsqueeze(1).repeat(1, seq_length, 1) 
-        print("NewsRecommendationModel user_embds before combined_vec shape:", user_embds.shape)
-        print("NewsRecommendationModel news_vec before combined_vec shape:", news_vec.shape)
-
-        combined_vec = torch.cat((news_vec, user_embds), dim=2)
-        print("NewsRecommendationModel combined_vec shape:", combined_vec.shape)
+        scores = torch.matmul(impression_embds, user_embds.unsqueeze(-1)).squeeze(-1)
+        scores = torch.sigmoid(scores)
         
-        score = self.dense(combined_vec)
-        print("NewsRecommendationModel score shape:", score.shape)      
-        
-        # Reshape targets to match the shape of score
-        targets = targets.unsqueeze(-1)
-        print("NewsRecommendationModel reshaped targets shape:", targets.shape)
+        loss = self.criterion(scores, targets.float())
 
-        # loss = self.criterion(score.view(-1, score.size(-1)), targets.view(-1))
-        loss = self.criterion(score, targets)
-        print("NewsRecommendationModel loss shape:", loss.shape)
-        return loss, score
+        return loss, scores
