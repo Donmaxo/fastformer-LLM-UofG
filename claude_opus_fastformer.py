@@ -209,7 +209,7 @@ class NewsRecommendationModel(torch.nn.Module):
         self.config = config
         self.fastformer_model = FastformerEncoder(config, emb_dim=news_embedding_dim)
         self.dense = nn.Linear(news_embedding_dim, num_classes)
-        self.criterion = nn.BCELoss()
+        self.criterion = nn.BCEWithLogitsLoss()
         self.apply(self.init_weights)
 
     def init_weights(self, module):
@@ -223,12 +223,11 @@ class NewsRecommendationModel(torch.nn.Module):
         batch_size, seq_length, emb_dim = user_history_embds.shape
 
         mask = torch.ones(batch_size, seq_length).to(self.device)
-
         user_embds = self.fastformer_model(user_history_embds, mask, -1)
-
-        scores = torch.matmul(impression_embds, user_embds.unsqueeze(-1)).squeeze(-1)
-        scores = torch.sigmoid(scores)
         
-        loss = self.criterion(scores, targets.float())
-
-        return loss, scores
+        if targets is not None:
+            scores = torch.matmul(impression_embds, user_embds.unsqueeze(-1)).squeeze(-1)
+            loss = self.criterion(scores, targets.float())
+            return loss, scores
+        else:
+            return user_embds
