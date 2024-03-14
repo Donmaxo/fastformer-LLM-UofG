@@ -72,6 +72,23 @@ def calculate_accuracy(scores, targets):
     accuracy = (predicts == targets).mean()
     return accuracy
 
+def custom_collate_fn(batch):
+    user_history_embds = []
+    impression_embds = []
+    impression_ids = []
+
+    for sample in batch:
+        user_history_embd, impression_embd, impression_id = sample
+        user_history_embds.append(user_history_embd)
+        impression_embds.append(impression_embd.numpy())
+        impression_ids.append(impression_id)
+
+    user_history_embds = torch.stack(user_history_embds)
+    impression_embds = np.array(impression_embds, dtype=object)
+    impression_ids = np.array(impression_ids)
+
+    return user_history_embds, impression_embds, impression_ids
+
 class MINDDataset(Dataset):
     def __init__(self, behaviors_df, news_embedding_dict, is_test=False):
         self.behaviors_df = behaviors_df
@@ -108,11 +125,13 @@ class MINDDataset(Dataset):
         
         user_history_embds = user_history_embds[:MAX_USER_HISTORY]
         user_history_embds += [torch.zeros(ff_config.hidden_size)] * (MAX_USER_HISTORY - len(user_history_embds))
-        impression_embds = impression_embds[:MAX_USER_HISTORY]
-        impression_embds += [torch.zeros(ff_config.hidden_size)] * (MAX_USER_HISTORY - len(impression_embds))
+        
         if not self.is_test:
             labels = labels[:MAX_USER_HISTORY]
-            labels += [0] * (MAX_USER_HISTORY - len(labels))
+            labels += [0] * (MAX_USER_HISTORY - len(labels)) 
+            impression_embds = impression_embds[:MAX_USER_HISTORY]
+            impression_embds += [torch.zeros(ff_config.hidden_size)] * (MAX_USER_HISTORY - len(impression_embds))
+       
 
         user_history_embds = torch.stack(user_history_embds)
         impression_embds = torch.stack(impression_embds)
@@ -135,7 +154,7 @@ def run_predictions(model, news_df, behaviors_df, output_path):
     print(f"Test news embeddings generated in {duration:.2f} seconds")
     
     test_dataset = MINDDataset(behaviors_df, news_embedding_dict_test, is_test=True)
-    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=custom_collate_fn)
 
     model.eval()
     group_impr_indexes = []
@@ -144,24 +163,25 @@ def run_predictions(model, news_df, behaviors_df, output_path):
     with torch.no_grad():
         for user_history_embds, impression_embds, impression_ids in tqdm(test_loader, desc="Running Predictions"):
             user_history_embds = user_history_embds.to(device)
-            impression_embds = impression_embds.to(device)
-
             user_embds = model(user_history_embds, None, None)
             user_embds = user_embds.detach().cpu().numpy()
-            impression_embds = impression_embds.detach().cpu().numpy()
 
-            scores = np.dot(impression_embds, user_embds.T)
+            scores = [np.argsort(np.dot(imp_embd, user_embd))[::-1] + 1 for imp_embd, user_embd in zip(impression_embds, user_embds)]
 
-            for impr_id, score in zip(impression_ids, scores):
+            for impr_id, rank in zip(impression_ids, scores):
                 group_impr_indexes.append(impr_id)
-                group_preds.append(score)
+                group_preds.append(rank)
+
+    # Sort group_impr_indexes and group_preds based on group_impr_indexes
+    sorted_indexes = np.argsort(group_impr_indexes)
+    sorted_impr_indexes = [group_impr_indexes[i] for i in sorted_indexes]
+    sorted_preds = [group_preds[i] for i in sorted_indexes]
 
     with open(os.path.join(output_path, 'prediction.txt'), 'w') as f:
-        for impr_index, preds in tqdm(zip(group_impr_indexes, group_preds), desc="Writing Predictions"):
+        for impr_index, pred_rank in tqdm(zip(sorted_impr_indexes, sorted_preds), desc="Writing Predictions"):
+            pred_rank_str = '[' + ','.join([str(i) for i in pred_rank]) + ']'
+            f.write(' '.join([str(impr_index), pred_rank_str]) + '\n')
             impr_index += 1
-            pred_rank = (np.argsort(np.argsort(preds)[::-1]) + 1).tolist()
-            pred_rank = '[' + ','.join([str(i) for i in pred_rank]) + ']'
-            f.write(' '.join([str(impr_index), pred_rank]) + '\n')
 
     f = zipfile.ZipFile(os.path.join(output_path, 'prediction.zip'), 'w', zipfile.ZIP_DEFLATED)
     f.write(os.path.join(output_path, 'prediction.txt'), arcname='prediction.txt')
