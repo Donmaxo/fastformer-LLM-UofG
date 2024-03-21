@@ -13,6 +13,7 @@ import zipfile
 import os
 import argparse
 import numpy as np
+import csv
 
 # Set the number of epochs
 num_epochs = 5
@@ -61,6 +62,12 @@ def generate_embeddings(texts, tokenizer, model, ff_model, max_length=config.hid
             attention_mask = preprocessed_texts['attention_mask']
             outputs = model(**preprocessed_texts)
             batch_embeddings = outputs[0].mean(dim=1)
+            
+            # Truncate batch_embeddings to a maximum length of 256
+            max_embedding_length = 256
+            batch_embeddings = batch_embeddings[:, :max_embedding_length]
+            attention_mask = attention_mask[:, :max_embedding_length]
+
             batch_embeddings = ff_model(batch_embeddings.unsqueeze(1), attention_mask[:, :1], -1)
         embeddings.append(batch_embeddings.cpu())
     return torch.cat(embeddings)
@@ -122,9 +129,16 @@ class MINDDataset(Dataset):
                 labels.append(int(label))
             if news_id in self.news_embedding_dict:
                 impression_embds.append(self.news_embedding_dict[news_id])
+            else:
+                impression_embds.append(torch.zeros(ff_config.hidden_size))
+                print(f"NewsID {news_id} not found in news_embedding_dict. Using zero vector instead.")
         
-        user_history_embds = user_history_embds[:MAX_USER_HISTORY]
-        user_history_embds += [torch.zeros(ff_config.hidden_size)] * (MAX_USER_HISTORY - len(user_history_embds))
+        # user_history_embds = user_history_embds[:MAX_USER_HISTORY]
+        # user_history_embds += [torch.zeros(ff_config.hidden_size)] * (MAX_USER_HISTORY - len(user_history_embds))
+        # Perform left padding on user history embeddings
+        padding_length = MAX_USER_HISTORY - len(user_history_embds)
+        user_history_embds = [torch.zeros(ff_config.hidden_size)] * padding_length + user_history_embds
+        user_history_embds = user_history_embds[-MAX_USER_HISTORY:]
         
         if not self.is_test:
             labels = labels[:MAX_USER_HISTORY]
@@ -196,6 +210,9 @@ if args.test_path:
 
     # Load and preprocess test dataset
     test_news_df = pd.read_csv(test_news_file_path, sep='\t', header=None, names=['NewsID', 'Category', 'SubCategory', 'Title', 'Abstract', 'URL', 'TitleEntities', 'AbstractEntities'])
+    print("Test news length: ", len(test_news_df))
+    print("Head of Test news for NewsID and Title: ", test_news_df[["NewsID", "Title"]].head())
+    print("Test news file path", test_news_file_path)
     test_behaviors_df = pd.read_csv(test_behaviors_file_path, sep='\t', header=None, names=['ImpressionID', 'UserID', 'Time', 'History', 'Impressions'])
 
     # Initialize the Fastformer model
@@ -211,25 +228,35 @@ if args.test_path:
 
 else:
     # Load and preprocess train and validation datasets
-    news_df_train = pd.read_csv(news_file_path_train, sep='\t', header=None, names=['NewsID', 'Category', 'SubCategory', 'Title', 'Abstract', 'URL', 'TitleEntities', 'AbstractEntities'])
+    news_df_train = pd.read_csv(news_file_path_train, sep='\t', header=None, names=['NewsID', 'Category', 'SubCategory', 'Title', 'Abstract', 'URL', 'TitleEntities', 'AbstractEntities'], quoting=csv.QUOTE_NONE)
     behaviors_df_train = pd.read_csv(behaviors_file_path_train, sep='\t', header=None, names=['ImpressionID', 'UserID', 'Time', 'History', 'Impressions'])
     news_df_val = pd.read_csv(news_file_path_val, sep='\t', header=None, names=['NewsID', 'Category', 'SubCategory', 'Title', 'Abstract', 'URL', 'TitleEntities', 'AbstractEntities'])
     behaviors_df_val = pd.read_csv(behaviors_file_path_val, sep='\t', header=None, names=['ImpressionID', 'UserID', 'Time', 'History', 'Impressions'])
 
     # Process news titles and generate embeddings
-    print("Generating news embeddings...")
+    print("Generating news embeddings TRAIN...")
     start_time = time.time()
     news_titles_train = news_df_train['Title'].tolist()
     news_embeddings_train = generate_embeddings(news_titles_train, tokenizer, tokenizer_model, ff_model, max_length=512)
     news_embedding_dict_train = dict(zip(news_df_train['NewsID'], news_embeddings_train))
     end_time = time.time()
     duration = end_time - start_time
-    print(f"News embeddings generated in {duration:.2f} seconds")
+    print(f"News embeddings TRAIN generated in {duration:.2f} seconds")
+
+    # Process news titles and generate embeddings
+    print("Generating news embeddings TEST...")
+    start_time = time.time()
+    news_titles_val = news_df_val['Title'].tolist()
+    news_embeddings_val = generate_embeddings(news_titles_val, tokenizer, tokenizer_model, ff_model, max_length=512)
+    news_embedding_dict_val = dict(zip(news_df_val['NewsID'], news_embeddings_val))
+    end_time = time.time()
+    duration = end_time - start_time
+    print(f"News embeddings TEST generated in {duration:.2f} seconds")
 
     # Create DataLoader
     train_dataset = MINDDataset(behaviors_df_train, news_embedding_dict_train)
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-    val_dataset = MINDDataset(behaviors_df_val, news_embedding_dict_train)
+    val_dataset = MINDDataset(behaviors_df_val, news_embedding_dict_val)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
     # Initialize the Fastformer model

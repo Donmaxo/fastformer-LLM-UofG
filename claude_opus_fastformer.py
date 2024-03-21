@@ -220,9 +220,10 @@ class NewsRecommendationModel(torch.nn.Module):
 
             
     def forward(self, user_history_embds, impression_embds, targets):
-        batch_size, seq_length, emb_dim = user_history_embds.shape
+        # batch_size, seq_length, emb_dim = user_history_embds.shape
 
-        mask = torch.ones(batch_size, seq_length).to(self.device)
+        # mask = torch.ones(batch_size, seq_length).to(self.device)
+        mask = (user_history_embds != 0).any(dim=-1).float()
         user_embds = self.fastformer_model(user_history_embds, mask, -1)
         
         if targets is not None:
