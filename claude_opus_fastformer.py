@@ -3,6 +3,10 @@ from transformers.models.bert.modeling_bert import BertSelfOutput, BertIntermedi
 import torch
 import torch.nn as nn
 
+from tnlrv3.GraphFormers.src.models.tnlrv3.modeling import TuringNLRv3ForSequenceClassification
+from tnlrv3.GraphFormers.src.models.tnlrv3.tokenization_tnlrv3 import TuringNLRv3Tokenizer
+from tnlrv3.GraphFormers.src.models.tnlrv3.config import TuringNLRv3ForSeq2SeqConfig
+
 import logging
 
 class AttentionPooling(nn.Module):
@@ -202,14 +206,16 @@ class FastformerEncoder(nn.Module):
         return output 
     
 
+# UserEncoder
 class NewsRecommendationModel(torch.nn.Module):
     def __init__(self, config, news_embedding_dim, num_classes, device):
         super(NewsRecommendationModel, self).__init__()
         self.device = device
         self.config = config
-        self.fastformer_model = FastformerEncoder(config, emb_dim=news_embedding_dim)
+        self.user_encoder = FastformerEncoder(config, emb_dim=news_embedding_dim)
         self.dense = nn.Linear(news_embedding_dim, num_classes)
-        self.criterion = nn.BCEWithLogitsLoss()
+        self.criterion = nn.CrossEntropyLoss() # FIX - changed to CrossEntropyLoss
+        # self.criterion = nn.BCEWithLogitsLoss()
         self.apply(self.init_weights)
 
     def init_weights(self, module):
@@ -219,15 +225,12 @@ class NewsRecommendationModel(torch.nn.Module):
             module.bias.data.zero_()
 
             
-    def forward(self, user_history_embds, impression_embds, targets):
-        # batch_size, seq_length, emb_dim = user_history_embds.shape
+    def forward(self, user_history_embds, user_history_embds_mask, impression_embds, targets):
 
-        # mask = torch.ones(batch_size, seq_length).to(self.device)
-        mask = (user_history_embds != 0).any(dim=-1).float()
-        user_embds = self.fastformer_model(user_history_embds, mask, -1)
-        
+        user_embds = self.user_encoder(user_history_embds, user_history_embds_mask) 
+
         if targets is not None:
-            scores = torch.matmul(impression_embds, user_embds.unsqueeze(-1)).squeeze(-1)
+            scores = torch.bmm(impression_embds, user_embds.unsqueeze(-1)).squeeze(-1)
             loss = self.criterion(scores, targets.float())
             return loss, scores
         else:
