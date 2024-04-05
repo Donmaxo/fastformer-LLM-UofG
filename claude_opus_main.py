@@ -16,7 +16,7 @@ import numpy as np
 import csv
 
 # Set the number of epochs
-num_epochs = 5
+num_epochs = 6
 MAX_USER_HISTORY = 50
 MAX_IMPRESSION_NEWS = 50
 BATCH_SIZE = 64
@@ -52,8 +52,9 @@ ff_config = BertConfig.from_json_file('fastformer_claude_opus.json')
 ff_model = FastformerEncoder(ff_config, emb_dim=ff_config.hidden_size)
 ff_model = ff_model.to(device)
 
-def generate_embeddings(texts, tokenizer, model, ff_model, max_length=config.hidden_size, batch_size=100):
+def generate_embeddings(texts, tokenizer, model, _, max_length=config.hidden_size, batch_size=100):
     embeddings = []
+    model.eval()
     for i in tqdm(range(0, len(texts), batch_size), desc="Generating Embeddings"):
         batch_texts = texts[i:i+batch_size]
         preprocessed_texts = tokenizer(batch_texts, padding=True, truncation=True, max_length=max_length, return_tensors="pt")
@@ -63,14 +64,14 @@ def generate_embeddings(texts, tokenizer, model, ff_model, max_length=config.hid
             outputs = model(**preprocessed_texts)
             batch_embeddings = outputs[0].mean(dim=1)
             
-            # Truncate batch_embeddings to a maximum length of 256
-            max_embedding_length = 256
-            batch_embeddings = batch_embeddings[:, :max_embedding_length]
-            attention_mask = attention_mask[:, :max_embedding_length]
+            # # Truncate batch_embeddings to a maximum length of 256
+            # max_embedding_length = 256
+            # batch_embeddings = batch_embeddings[:, :max_embedding_length]
+            # attention_mask = attention_mask[:, :max_embedding_length]
 
-            batch_embeddings = ff_model(batch_embeddings.unsqueeze(1), attention_mask[:, :1], -1)
         embeddings.append(batch_embeddings.cpu())
     return torch.cat(embeddings)
+
 
 def calculate_accuracy(scores, targets):
     scores = scores.detach().cpu().numpy()
@@ -171,35 +172,26 @@ def run_predictions(model, news_df, behaviors_df, output_path):
     test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=custom_collate_fn)
 
     model.eval()
-    group_impr_indexes = []
-    group_preds = []
-
+    ### - fixed predicting
+    ################# - added manually for testing
+    fil = open("predictions/prediction.txt", "w")
+    
     with torch.no_grad():
         for user_history_embds, impression_embds, impression_ids in tqdm(test_loader, desc="Running Predictions"):
             user_history_embds = user_history_embds.to(device)
+
             user_embds = model(user_history_embds, None, None)
             user_embds = user_embds.detach().cpu().numpy()
 
-            scores = [np.argsort(np.dot(imp_embd, user_embd))[::-1] + 1 for imp_embd, user_embd in zip(impression_embds, user_embds)]
-
-            for impr_id, rank in zip(impression_ids, scores):
-                group_impr_indexes.append(impr_id)
-                group_preds.append(rank)
-
-    # Sort group_impr_indexes and group_preds based on group_impr_indexes
-    sorted_indexes = np.argsort(group_impr_indexes)
-    sorted_impr_indexes = [group_impr_indexes[i] for i in sorted_indexes]
-    sorted_preds = [group_preds[i] for i in sorted_indexes]
-
-    with open(os.path.join(output_path, 'prediction.txt'), 'w') as f:
-        for impr_index, pred_rank in tqdm(zip(sorted_impr_indexes, sorted_preds), desc="Writing Predictions"):
-            pred_rank_str = '[' + ','.join([str(i) for i in pred_rank]) + ']'
-            f.write(' '.join([str(impr_index), pred_rank_str]) + '\n')
-            impr_index += 1
-
-    f = zipfile.ZipFile(os.path.join(output_path, 'prediction.zip'), 'w', zipfile.ZIP_DEFLATED)
-    f.write(os.path.join(output_path, 'prediction.txt'), arcname='prediction.txt')
-    f.close()
+            for id, user_vec, news_vec in zip(
+                    impression_ids, user_embds, impression_embds):
+                score = np.dot(
+                        news_vec, user_vec
+                    )
+                pred_rank = (np.argsort(np.argsort(score)[::-1]) + 1).tolist()
+                fil.write(str(id) + ' ' + '[' + ','.join([str(x) for x in pred_rank]) + ']' + '\n')      
+    fil.close()
+    #################
 
     print("Predictions written to file")
 
