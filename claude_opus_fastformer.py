@@ -200,6 +200,7 @@ class FastformerEncoder(nn.Module):
         output = self.poolers[pooler_index](all_hidden_states[-1], attention_mask)
 
         return output 
+
     
 
 class NewsRecommendationModel(torch.nn.Module):
@@ -208,8 +209,9 @@ class NewsRecommendationModel(torch.nn.Module):
         self.device = device
         self.config = config
         self.fastformer_model = FastformerEncoder(config, emb_dim=news_embedding_dim)
+
         self.dense = nn.Linear(news_embedding_dim, num_classes)
-        self.criterion = nn.BCEWithLogitsLoss()
+        self.criterion = nn.CrossEntropyLoss()
         self.apply(self.init_weights)
 
     def init_weights(self, module):
@@ -220,12 +222,9 @@ class NewsRecommendationModel(torch.nn.Module):
 
             
     def forward(self, user_history_embds, impression_embds, targets):
-        # batch_size, seq_length, emb_dim = user_history_embds.shape
+        attention_mask = (user_history_embds != 0).any(dim=-1).float()
+        user_embds = self.fastformer_model(user_history_embds, attention_mask)
 
-        # mask = torch.ones(batch_size, seq_length).to(self.device)
-        mask = (user_history_embds != 0).any(dim=-1).float()
-        user_embds = self.fastformer_model(user_history_embds, mask, -1)
-        
         if targets is not None:
             scores = torch.matmul(impression_embds, user_embds.unsqueeze(-1)).squeeze(-1)
             loss = self.criterion(scores, targets.float())

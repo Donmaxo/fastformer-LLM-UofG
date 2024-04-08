@@ -5,12 +5,10 @@ from tnlrv3.GraphFormers.src.models.tnlrv3.config import TuringNLRv3ForSeq2SeqCo
 from transformers import BertConfig
 import torch
 from torch.utils.data import Dataset, DataLoader
-from claude_opus_fastformer import NewsRecommendationModel, FastformerEncoder
+from claude_opus_fastformer import NewsRecommendationModel
 from torch.optim import Adam
 import time
 from tqdm import tqdm
-import zipfile
-import os
 import argparse
 import numpy as np
 import csv
@@ -19,7 +17,7 @@ import csv
 num_epochs = 6
 MAX_USER_HISTORY = 50
 MAX_IMPRESSION_NEWS = 50
-BATCH_SIZE = 64
+BATCH_SIZE = 16
 dataset_type = "large"
 
 # Set the device to GPU
@@ -32,7 +30,7 @@ news_file_path_val = f'/mnt/c/Users/maxdo/Documents/University/data/{dataset_typ
 behaviors_file_path_val = f'/mnt/c/Users/maxdo/Documents/University/data/{dataset_type}/valid/behaviors.tsv'
 
 # Path to the UNILM model directory
-model_path = "/mnt/c/Users/maxdo/Documents/University/data/unilm/minilm"
+model_path = "/mnt/c/Users/maxdo/Documents/University/data/unilm/v2-base-uncased"
 
 
 parser = argparse.ArgumentParser()
@@ -48,11 +46,7 @@ tokenizer_model = tokenizer_model.to(device)
 # Load the Fastformer model configuration
 ff_config = BertConfig.from_json_file('fastformer_claude_opus.json')
 
-# Create an instance of the Fastformer model for generating news embeddings
-ff_model = FastformerEncoder(ff_config, emb_dim=ff_config.hidden_size)
-ff_model = ff_model.to(device)
-
-def generate_embeddings(texts, tokenizer, model, _, max_length=config.hidden_size, batch_size=100):
+def generate_embeddings(texts, tokenizer, model, max_length=config.hidden_size, batch_size=100):
     embeddings = []
     model.eval()
     for i in tqdm(range(0, len(texts), batch_size), desc="Generating Embeddings"):
@@ -64,10 +58,10 @@ def generate_embeddings(texts, tokenizer, model, _, max_length=config.hidden_siz
             outputs = model(**preprocessed_texts)
             batch_embeddings = outputs[0].mean(dim=1)
             
-            # # Truncate batch_embeddings to a maximum length of 256
-            # max_embedding_length = 256
-            # batch_embeddings = batch_embeddings[:, :max_embedding_length]
-            # attention_mask = attention_mask[:, :max_embedding_length]
+            # Truncate batch_embeddings to a maximum length of 256
+            max_embedding_length = 256
+            batch_embeddings = batch_embeddings[:, :max_embedding_length]
+            attention_mask = attention_mask[:, :max_embedding_length]
 
         embeddings.append(batch_embeddings.cpu())
     return torch.cat(embeddings)
@@ -133,10 +127,7 @@ class MINDDataset(Dataset):
             else:
                 impression_embds.append(torch.zeros(ff_config.hidden_size))
                 print(f"NewsID {news_id} not found in news_embedding_dict. Using zero vector instead.")
-        
-        # user_history_embds = user_history_embds[:MAX_USER_HISTORY]
-        # user_history_embds += [torch.zeros(ff_config.hidden_size)] * (MAX_USER_HISTORY - len(user_history_embds))
-        # Perform left padding on user history embeddings
+
         padding_length = MAX_USER_HISTORY - len(user_history_embds)
         user_history_embds = [torch.zeros(ff_config.hidden_size)] * padding_length + user_history_embds
         user_history_embds = user_history_embds[-MAX_USER_HISTORY:]
@@ -162,7 +153,7 @@ def run_predictions(model, news_df, behaviors_df, output_path):
     print("Generating test news embeddings...")
     start_time = time.time()
     news_titles = news_df['Title'].tolist()
-    news_embeddings = generate_embeddings(news_titles, tokenizer, tokenizer_model, ff_model, max_length=512)
+    news_embeddings = generate_embeddings(news_titles, tokenizer, tokenizer_model, max_length=512)
     news_embedding_dict_test = dict(zip(news_df['NewsID'], news_embeddings))
     end_time = time.time()
     duration = end_time - start_time
@@ -172,8 +163,6 @@ def run_predictions(model, news_df, behaviors_df, output_path):
     test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=custom_collate_fn)
 
     model.eval()
-    ### - fixed predicting
-    ################# - added manually for testing
     fil = open("predictions/prediction.txt", "w")
     
     with torch.no_grad():
@@ -191,7 +180,6 @@ def run_predictions(model, news_df, behaviors_df, output_path):
                 pred_rank = (np.argsort(np.argsort(score)[::-1]) + 1).tolist()
                 fil.write(str(id) + ' ' + '[' + ','.join([str(x) for x in pred_rank]) + ']' + '\n')      
     fil.close()
-    #################
 
     print("Predictions written to file")
 
@@ -229,7 +217,7 @@ else:
     print("Generating news embeddings TRAIN...")
     start_time = time.time()
     news_titles_train = news_df_train['Title'].tolist()
-    news_embeddings_train = generate_embeddings(news_titles_train, tokenizer, tokenizer_model, ff_model, max_length=512)
+    news_embeddings_train = generate_embeddings(news_titles_train, tokenizer, tokenizer_model, max_length=512)
     news_embedding_dict_train = dict(zip(news_df_train['NewsID'], news_embeddings_train))
     end_time = time.time()
     duration = end_time - start_time
@@ -239,7 +227,7 @@ else:
     print("Generating news embeddings TEST...")
     start_time = time.time()
     news_titles_val = news_df_val['Title'].tolist()
-    news_embeddings_val = generate_embeddings(news_titles_val, tokenizer, tokenizer_model, ff_model, max_length=512)
+    news_embeddings_val = generate_embeddings(news_titles_val, tokenizer, tokenizer_model, max_length=512)
     news_embedding_dict_val = dict(zip(news_df_val['NewsID'], news_embeddings_val))
     end_time = time.time()
     duration = end_time - start_time
@@ -259,6 +247,7 @@ else:
     optimizer = Adam(nr_model.parameters(), lr=1e-5)
 
     # Training loop
+    train_start_time = time.time()
     for epoch in range(num_epochs):
         nr_model.train()
         total_loss = 0
@@ -277,6 +266,8 @@ else:
             avg_loss = total_loss / (progress_bar.n + 1)
             progress_bar.set_postfix(loss=avg_loss)
 
+        print(f"Epoch {epoch+1}, Average Loss: {avg_loss:.4f}, Time Taken (hh:mm:ss): {int(progress_bar.format_dict['elapsed']//3600):02d}:{int(progress_bar.format_dict['elapsed']%3600//60):02d}:{int(progress_bar.format_dict['elapsed']%60//1):02d}")
+
         # Evaluate on the validation set
         nr_model.eval()
         val_accuracy = 0
@@ -291,11 +282,23 @@ else:
 
         val_accuracy /= len(val_loader)
 
+
         avg_loss = total_loss / len(train_loader)
         print(f"Epoch {epoch+1}, Average Loss: {avg_loss:.4f}, Validation Accuracy: {val_accuracy:.4f}")
-    
+        
         # Save the model after every epoch
         torch.save(nr_model.state_dict(), f"trained-models/fastformer_model_epoch_{epoch+1}.pth")
+  
+  
+    # Get duration
+    train_end_time = time.time()
+    total_duration = train_end_time - train_start_time
 
+    # Convert total_duration to hours, minutes, and seconds
+    total_duration_hours = int(total_duration // 3600)
+    total_duration_minutes = int((total_duration % 3600) // 60)
+    total_duration_seconds = int((total_duration % 60) // 1)
+    print(f"Total Training Time (hh:mm:ss): {total_duration_hours:02d}:{total_duration_minutes:02d}:{total_duration_seconds:02d}")
+       
     # Save the final model
     torch.save(nr_model.state_dict(), "trained-models/fastformer_model_final.pth")
